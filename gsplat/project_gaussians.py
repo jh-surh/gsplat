@@ -1,6 +1,6 @@
 """Python bindings for 3D gaussian projection"""
 
-from typing import Tuple
+from typing import Optional, Tuple
 
 from jaxtyping import Float
 from torch import Tensor
@@ -15,7 +15,7 @@ def project_gaussians(
     glob_scale: float,
     quats: Float[Tensor, "*batch 4"],
     viewmat: Float[Tensor, "4 4"],
-    projmat: Float[Tensor, "4 4"],
+    projmat: Optional[Float[Tensor, "4 4"]],
     fx: float,
     fy: float,
     cx: float,
@@ -62,7 +62,7 @@ def project_gaussians(
         glob_scale,
         quats.contiguous(),
         viewmat.contiguous(),
-        projmat.contiguous(),
+        None,
         fx,
         fy,
         cx,
@@ -85,7 +85,7 @@ class _ProjectGaussians(Function):
         glob_scale: float,
         quats: Float[Tensor, "*batch 4"],
         viewmat: Float[Tensor, "4 4"],
-        projmat: Float[Tensor, "4 4"],
+        projmat: Optional[Float[Tensor, "4 4"]],
         fx: float,
         fy: float,
         cx: float,
@@ -111,7 +111,6 @@ class _ProjectGaussians(Function):
             glob_scale,
             quats,
             viewmat,
-            projmat,
             fx,
             fy,
             cx,
@@ -138,7 +137,6 @@ class _ProjectGaussians(Function):
             scales,
             quats,
             viewmat,
-            projmat,
             cov3d,
             radii,
             conics,
@@ -153,7 +151,6 @@ class _ProjectGaussians(Function):
             scales,
             quats,
             viewmat,
-            projmat,
             cov3d,
             radii,
             conics,
@@ -166,7 +163,6 @@ class _ProjectGaussians(Function):
             ctx.glob_scale,
             quats,
             viewmat,
-            projmat,
             ctx.fx,
             ctx.fy,
             ctx.cx,
