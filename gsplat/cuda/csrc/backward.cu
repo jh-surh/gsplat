@@ -333,7 +333,8 @@ __global__ void project_gaussians_backward_kernel(
     float* __restrict__ v_cov3d,
     float3* __restrict__ v_mean3d,
     float3* __restrict__ v_scale,
-    float4* __restrict__ v_quat
+    float4* __restrict__ v_quat,
+    float* __restrict__ v_viewmat
 ) {
     unsigned idx = cg::this_grid().thread_rank(); // idx of thread within grid
     if (idx >= num_points || radii[idx] <= 0) {
@@ -344,17 +345,34 @@ __global__ void project_gaussians_backward_kernel(
     float fy = intrins.y;
     float3 p_view = transform_4x3(viewmat, p_world);
     // get v_mean3d from v_xy
-    v_mean3d[idx] = transform_4x3_rot_only_transposed(
-        viewmat,
-        project_pix_vjp({fx, fy}, p_view, v_xy[idx]));
+    float3 v_p_view = project_pix_vjp({fx, fy}, p_view, v_xy[idx]);
+    v_mean3d[idx] = transform_4x3_rot_only_transposed(viewmat, v_p_view);
 
-    // get z gradient contribution to mean3d gradient
+    // get v_viewmat contribution from d_p_view
+    atomicAdd(&v_viewmat[0], v_p_view.x * p_world.x);
+    atomicAdd(&v_viewmat[1], v_p_view.x * p_world.y);
+    atomicAdd(&v_viewmat[2], v_p_view.x * p_world.z);
+    atomicAdd(&v_viewmat[3], v_p_view.x);
+    atomicAdd(&v_viewmat[4], v_p_view.y * p_world.x);
+    atomicAdd(&v_viewmat[5], v_p_view.y * p_world.y);
+    atomicAdd(&v_viewmat[6], v_p_view.y * p_world.z);
+    atomicAdd(&v_viewmat[7], v_p_view.y);
+    atomicAdd(&v_viewmat[8], v_p_view.z * p_world.x);
+    atomicAdd(&v_viewmat[9], v_p_view.z * p_world.y);
+    atomicAdd(&v_viewmat[10], v_p_view.z * p_world.z);
+    atomicAdd(&v_viewmat[11], v_p_view.z);
+
+    // get z gradient contribution to mean3d gradient and viewmat
     // z = viemwat[8] * mean3d.x + viewmat[9] * mean3d.y + viewmat[10] *
     // mean3d.z + viewmat[11]
     float v_z = v_depth[idx];
     v_mean3d[idx].x += viewmat[8] * v_z;
     v_mean3d[idx].y += viewmat[9] * v_z;
     v_mean3d[idx].z += viewmat[10] * v_z;
+    atomicAdd(&v_viewmat[8], v_z * p_world.x);
+    atomicAdd(&v_viewmat[9], v_z * p_world.y);
+    atomicAdd(&v_viewmat[10], v_z * p_world.z);
+    atomicAdd(&v_viewmat[11], v_z);
 
     // get v_cov2d
     cov2d_to_conic_vjp(conics[idx], v_conic[idx], v_cov2d[idx]);
@@ -367,7 +385,8 @@ __global__ void project_gaussians_backward_kernel(
         fy,
         v_cov2d[idx],
         v_mean3d[idx],
-        &(v_cov3d[6 * idx])
+        &(v_cov3d[6 * idx]),
+        v_viewmat
     );
     // get v_scale and v_quat
     scale_rot_to_cov3d_vjp(
@@ -389,7 +408,8 @@ __device__ void project_cov3d_ewa_vjp(
     const float fy,
     const float3& __restrict__ v_cov2d,
     float3& __restrict__ v_mean3d,
-    float* __restrict__ v_cov3d
+    float* __restrict__ v_cov3d,
+    float* __restrict__ v_viewmat
 ) {
     // viewmat is row major, glm is column major
     // upper 3x3 submatrix
@@ -459,6 +479,20 @@ __device__ void project_cov3d_ewa_vjp(
     v_mean3d.x += (float)glm::dot(v_t, W[0]);
     v_mean3d.y += (float)glm::dot(v_t, W[1]);
     v_mean3d.z += (float)glm::dot(v_t, W[2]);
+
+    // compute v_t contributions to df/d_viewmat
+    atomicAdd(&v_viewmat[0], v_t[0] * mean3d.x);
+    atomicAdd(&v_viewmat[1], v_t[0] * mean3d.y);
+    atomicAdd(&v_viewmat[2], v_t[0] * mean3d.z);
+    atomicAdd(&v_viewmat[3], v_t[0]);
+    atomicAdd(&v_viewmat[4], v_t[1] * mean3d.x);
+    atomicAdd(&v_viewmat[5], v_t[1] * mean3d.y);
+    atomicAdd(&v_viewmat[6], v_t[1] * mean3d.z);
+    atomicAdd(&v_viewmat[7], v_t[1]);
+    atomicAdd(&v_viewmat[8], v_t[2] * mean3d.x);
+    atomicAdd(&v_viewmat[9], v_t[2] * mean3d.y);
+    atomicAdd(&v_viewmat[10], v_t[2] * mean3d.z);
+    atomicAdd(&v_viewmat[11], v_t[2]);
 }
 
 // given cotangent v in output space (e.g. d_L/d_cov3d) in R(6)
