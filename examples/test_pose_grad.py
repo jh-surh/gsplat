@@ -10,7 +10,9 @@ import tyro
 from gsplat.project_gaussians import _ProjectGaussians
 from gsplat.rasterize import _RasterizeGaussians
 from PIL import Image
+import pytorch3d.transforms as p3d
 from torch import Tensor, optim
+import torch.nn.functional as F
 
 
 class SimpleTrainer:
@@ -71,15 +73,17 @@ class SimpleTrainer:
             ],
             device=self.device,
         )
-        self.pose_mat = torch.tensor(
-            [
-                [1.0, 0.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 1.0],
-                [0.0, 0.0, 1.0, 8.0],
-                [0.0, 0.0, 0.0, 1.0],
-            ],
-            device=self.device,
+        self.pose_mat = self.viewmat.clone()
+        rot_noise = p3d.euler_angles_to_matrix(
+            bd
+            * (torch.rand(3, device=self.device) - 0.5)
+            * math.pi
+            / 18.0,  # +-10 degrees
+            convention="XYZ",
         )
+        self.pose_mat[:3, :3] = torch.matmul(self.pose_mat[:3, :3], rot_noise)
+        self.pose_mat[:3, 3] += torch.rand(3, device=self.device)
+        self.pose_params = torch.zeros(6, device=self.device)
         self.background = torch.zeros(3, device=self.device)
 
         self.means.requires_grad = True
@@ -88,8 +92,9 @@ class SimpleTrainer:
         self.rgbs.requires_grad = True
         self.opacities.requires_grad = True
         self.viewmat.requires_grad = False
-        self.pose_mat.requires_grad = True
-    
+        self.pose_mat.requires_grad = False
+        self.pose_params.requires_grad = True
+
     def save_image(self, img: Tensor, fname: str):
         out_img = Image.fromarray((img.detach().cpu().numpy() * 255).astype(np.uint8))
         out_dir = os.path.join(os.getcwd(), "renders")
@@ -97,6 +102,7 @@ class SimpleTrainer:
         out_img.save(f"{out_dir}/{fname}.png")
 
     def train(self, iterations: int = 1000, lr: float = 0.01, save_imgs: bool = False):
+        # optimize gaussians
         optimizer = optim.Adam(
             [self.rgbs, self.means, self.scales, self.opacities, self.quats], lr
         )
@@ -172,13 +178,19 @@ class SimpleTrainer:
         self.save_image(out_img, "objective")
 
         # save image prior to camera pose optimazation
+        view_mat = torch.eye(4, device=self.device)
+        view_mat[:3, :3] = torch.matmul(
+            self.pose_mat[:3, :3],
+            p3d.euler_angles_to_matrix(self.pose_params[:3], convention="XYZ"),
+        )
+        view_mat[:3, 3] = self.pose_mat[:3, 3] + self.pose_params[3:]
         xys, depths, radii, conics, num_tiles_hit, cov3d = _ProjectGaussians.apply(
             self.means,
             self.scales,
             1,
             self.quats,
-            self.pose_mat,
-            self.pose_mat,
+            view_mat,
+            view_mat,
             self.focal,
             self.focal,
             self.W / 2,
@@ -201,7 +213,90 @@ class SimpleTrainer:
             self.background,
         )
         torch.cuda.synchronize()
-        self.save_image(out_img, "before_pose_opt")
+        self.save_image(out_img, "pose_before_opt")
+
+        # optimize camera pose
+        optimizer = optim.Adam([self.pose_params], lr)
+        mse_loss = torch.nn.MSELoss()
+        frames = []
+        times = [0] * 3  # project, rasterize, backward
+        for iter in range(iterations):
+            start = time.time()
+            view_mat = torch.eye(4, device=self.device)
+            view_mat[:3, :3] = torch.matmul(
+                self.pose_mat[:3, :3],
+                p3d.euler_angles_to_matrix(self.pose_params[:3], convention="XYZ"),
+            )
+            view_mat[:3, 3] = self.pose_mat[:3, 3] + self.pose_params[3:]
+            xys, depths, radii, conics, num_tiles_hit, cov3d = _ProjectGaussians.apply(
+                self.means,
+                self.scales,
+                1,
+                self.quats,
+                view_mat,
+                view_mat,
+                self.focal,
+                self.focal,
+                self.W / 2,
+                self.H / 2,
+                self.H,
+                self.W,
+                self.tile_bounds,
+            )
+            torch.cuda.synchronize()
+            times[0] += time.time() - start
+            start = time.time()
+            out_img = _RasterizeGaussians.apply(
+                xys,
+                depths,
+                radii,
+                conics,
+                num_tiles_hit,
+                torch.sigmoid(self.rgbs),
+                torch.sigmoid(self.opacities),
+                self.H,
+                self.W,
+                self.background,
+            )
+            torch.cuda.synchronize()
+            times[1] += time.time() - start
+            loss = mse_loss(out_img, self.gt_image)
+            optimizer.zero_grad()
+            start = time.time()
+            loss.backward()
+            torch.cuda.synchronize()
+            times[2] += time.time() - start
+            optimizer.step()
+            print(f"Iteration {iter + 1}/{iterations}, Loss: {loss.item()}")
+
+            if save_imgs and iter % 5 == 0:
+                frames.append((out_img.detach().cpu().numpy() * 255).astype(np.uint8))
+                
+        final_pose = torch.eye(4, device=self.device)
+        final_pose[:3, :3] = torch.matmul(
+            self.pose_mat[:3, :3],
+            p3d.euler_angles_to_matrix(self.pose_params[:3], convention="XYZ"),
+        )
+        final_pose[:3, 3] = self.pose_mat[:3, 3] + self.pose_params[3:]
+        print("target pose:\n", self.viewmat)
+        print("initial pose:\n", self.pose_mat)
+        print("initial residual:\n", self.pose_mat - self.viewmat)
+        print("final pose:\n", final_pose)
+        print("final residual:\n", final_pose - self.viewmat)
+        if save_imgs:
+            # save them as a gif with PIL
+            frames = [Image.fromarray(frame) for frame in frames]
+            out_dir = os.path.join(os.getcwd(), "renders")
+            os.makedirs(out_dir, exist_ok=True)
+            frames[0].save(
+                f"{out_dir}/pose_training.gif",
+                save_all=True,
+                append_images=frames[1:],
+                optimize=False,
+                duration=5,
+                loop=0,
+            )
+        self.save_image(out_img, "pose_after_opt")
 
 
 def image_path_to_tensor(image_path: Path):
