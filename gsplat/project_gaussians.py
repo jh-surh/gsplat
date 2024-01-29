@@ -28,7 +28,7 @@ def project_gaussians(
     """This function projects 3D gaussians to 2D using the EWA splatting method for gaussian splatting.
 
     Note:
-        This function is differentiable w.r.t the means3d, scales and quats inputs.
+        This function is differentiable w.r.t the means3d, scales, quats, and viewmat inputs.
 
     Args:
        means3d (Tensor): xyzs of gaussians.
