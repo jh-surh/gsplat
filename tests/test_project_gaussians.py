@@ -42,7 +42,6 @@ def test_project_gaussians_forward():
         glob_scale,
         quats,
         viewmat,
-        projmat,
         fx,
         fy,
         W / 2,
