@@ -271,7 +271,7 @@ class SimpleTrainer:
 
             if save_imgs and iter % 5 == 0:
                 frames.append((out_img.detach().cpu().numpy() * 255).astype(np.uint8))
-                
+
         final_pose = torch.eye(4, device=self.device)
         final_pose[:3, :3] = torch.matmul(
             self.pose_mat[:3, :3],

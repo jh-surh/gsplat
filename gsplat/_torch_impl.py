@@ -331,7 +331,6 @@ def get_tile_bin_edges(num_intersects, isect_ids_sorted):
     )
 
     for idx in range(num_intersects):
-
         cur_tile_idx = isect_ids_sorted[idx] >> 32
 
         if idx == 0:
