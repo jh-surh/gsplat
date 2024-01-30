@@ -73,7 +73,7 @@ class SimpleTrainer:
             ],
             device=self.device,
         )
-        self.pose_mat = self.viewmat.clone()
+        self.noisy_pose = self.viewmat.clone()
         rot_noise = p3d.euler_angles_to_matrix(
             bd
             * (torch.rand(3, device=self.device) - 0.5)
@@ -81,9 +81,11 @@ class SimpleTrainer:
             / 18.0,  # +-10 degrees
             convention="XYZ",
         )
-        self.pose_mat[:3, :3] = torch.matmul(self.pose_mat[:3, :3], rot_noise)
-        self.pose_mat[:3, 3] += torch.rand(3, device=self.device)
-        self.pose_params = torch.zeros(6, device=self.device)
+        self.noisy_pose[:3, :3] = torch.matmul(self.noisy_pose[:3, :3], rot_noise)
+        self.noisy_pose[:3, 3] += torch.rand(3, device=self.device)
+        self.pose_params = p3d.se3_log_map(
+            self.noisy_pose.unsqueeze(0).permute(0, 2, 1)
+        ).squeeze(0)
         self.background = torch.zeros(3, device=self.device)
 
         self.means.requires_grad = True
@@ -92,7 +94,7 @@ class SimpleTrainer:
         self.rgbs.requires_grad = True
         self.opacities.requires_grad = True
         self.viewmat.requires_grad = False
-        self.pose_mat.requires_grad = False
+        self.noisy_pose.requires_grad = False
         self.pose_params.requires_grad = True
 
     def save_image(self, img: Tensor, fname: str):
@@ -178,19 +180,13 @@ class SimpleTrainer:
         self.save_image(out_img, "objective")
 
         # save image prior to camera pose optimazation
-        view_mat = torch.eye(4, device=self.device)
-        view_mat[:3, :3] = torch.matmul(
-            self.pose_mat[:3, :3],
-            p3d.euler_angles_to_matrix(self.pose_params[:3], convention="XYZ"),
-        )
-        view_mat[:3, 3] = self.pose_mat[:3, 3] + self.pose_params[3:]
         xys, depths, radii, conics, num_tiles_hit, cov3d = _ProjectGaussians.apply(
             self.means,
             self.scales,
             1,
             self.quats,
-            view_mat,
-            view_mat,
+            p3d.se3_exp_map(self.pose_params.unsqueeze(0)).squeeze(0).permute(1, 0),
+            None,
             self.focal,
             self.focal,
             self.W / 2,
@@ -222,19 +218,13 @@ class SimpleTrainer:
         times = [0] * 3  # project, rasterize, backward
         for iter in range(iterations):
             start = time.time()
-            view_mat = torch.eye(4, device=self.device)
-            view_mat[:3, :3] = torch.matmul(
-                self.pose_mat[:3, :3],
-                p3d.euler_angles_to_matrix(self.pose_params[:3], convention="XYZ"),
-            )
-            view_mat[:3, 3] = self.pose_mat[:3, 3] + self.pose_params[3:]
             xys, depths, radii, conics, num_tiles_hit, cov3d = _ProjectGaussians.apply(
                 self.means,
                 self.scales,
                 1,
                 self.quats,
-                view_mat,
-                view_mat,
+                p3d.se3_exp_map(self.pose_params.unsqueeze(0)).squeeze(0).permute(1, 0),
+                None,
                 self.focal,
                 self.focal,
                 self.W / 2,
@@ -272,15 +262,12 @@ class SimpleTrainer:
             if save_imgs and iter % 5 == 0:
                 frames.append((out_img.detach().cpu().numpy() * 255).astype(np.uint8))
 
-        final_pose = torch.eye(4, device=self.device)
-        final_pose[:3, :3] = torch.matmul(
-            self.pose_mat[:3, :3],
-            p3d.euler_angles_to_matrix(self.pose_params[:3], convention="XYZ"),
+        final_pose = (
+            p3d.se3_exp_map(self.pose_params.unsqueeze(0)).squeeze(0).permute(1, 0)
         )
-        final_pose[:3, 3] = self.pose_mat[:3, 3] + self.pose_params[3:]
         print("target pose:\n", self.viewmat)
-        print("initial pose:\n", self.pose_mat)
-        print("initial residual:\n", self.pose_mat - self.viewmat)
+        print("initial pose:\n", self.noisy_pose)
+        print("initial residual:\n", self.noisy_pose - self.viewmat)
         print("final pose:\n", final_pose)
         print("final residual:\n", final_pose - self.viewmat)
         if save_imgs:
