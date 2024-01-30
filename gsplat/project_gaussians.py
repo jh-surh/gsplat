@@ -36,7 +36,7 @@ def project_gaussians(
        glob_scale (float): A global scaling factor applied to the scene.
        quats (Tensor): rotations in quaternion [w,x,y,z] format.
        viewmat (Tensor): view matrix for rendering.
-       projmat (Tensor): projection matrix for rendering.
+       projmat (Tensor): projection matrix for rendering. [Unused]
        fx (float): focal length x.
        fy (float): focal length y.
        cx (float): principal point x.
